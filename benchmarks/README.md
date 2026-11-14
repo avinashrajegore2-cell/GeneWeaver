@@ -51,3 +51,33 @@ conclusive performance comparison.
 Chunking reduces the size of intermediate comparison arrays.
 The reference sequence is still encoded in memory in full.
 Further memory optimization is needed for genome-scale FASTA processing.
+
+## Streaming FASTA Alignment
+
+### Test configuration
+- Reference genome: 1,000,000 base pairs
+- Guide length: 20 base pairs
+- Maximum mismatches: 3
+- Streaming chunk size: 100,000 base pairs
+- Input: Reproducible synthetic FASTA
+
+### Results
+
+| Metric | Standard NumPy | Streaming |
+|---|---:|---:|
+| Execution time | 0.1666 seconds | 0.2252 seconds |
+| Peak traced memory | 28.67 MB | 3.83 MB |
+| Matches found | 2 | 2 |
+
+### Performance
+- Streaming traced-memory reduction: approximately 86.6%
+- Standard/streaming traced-memory ratio: approximately 7.48x
+- Streaming execution was approximately 35% slower in this run.
+- Result verification: Passed
+
+### Notes
+This is a single-run synthetic benchmark.
+Memory was measured using Python tracemalloc and does not
+represent total process RAM or all native NumPy allocations.
+The results demonstrate lower traced Python memory usage,
+not a statistically conclusive performance improvement.
