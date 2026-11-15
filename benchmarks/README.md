@@ -81,3 +81,35 @@ Memory was measured using Python tracemalloc and does not
 represent total process RAM or all native NumPy allocations.
 The results demonstrate lower traced Python memory usage,
 not a statistically conclusive performance improvement.
+
+## Dask Distributed Alignment Benchmark
+
+### Configuration
+- Reference: 1,000,000 synthetic DNA base pairs
+- Guide length: 20 base pairs
+- Mismatch threshold: 3
+- Chunk size: 100,000 base pairs
+- Dask workers: 2 local workers, one thread each
+- Scheduler: Local Dask cluster (`processes=False`)
+- An exact guide match was inserted at position 500,000.
+
+### Results
+
+| Metric | Streaming | Dask |
+|---|---:|---:|
+| Runtime | 0.1928 s | 0.7434 s |
+| Traced peak memory | 3.95 MB | 9.97 MB |
+| Matches found | 2 | 2 |
+
+- Result verification: PASSED
+- Known exact-match verification: PASSED
+- Dask runtime was approximately 3.86x the streaming runtime.
+- Dask traced peak memory was approximately 2.52x the streaming result.
+
+### Analysis and limitations
+
+For this 1-million-base single-machine workload, Dask was slower than the streaming implementation. Cluster initialization, task scheduling, and result collection introduced overhead that outweighed the benefit of distributing this relatively small workload.
+
+This benchmark demonstrates local Dask task scheduling, not multi-machine or multi-GPU execution. The workers used local threads (`processes=False`). Traced memory comes from Python `tracemalloc` and does not represent total process or system RAM.
+
+The benchmark uses synthetic DNA and is not a human-genome performance measurement. Larger workloads and a multi-machine environment are needed to evaluate Dask's scalability.
