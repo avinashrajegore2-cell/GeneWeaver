@@ -122,7 +122,4 @@ def find_off_targets_dask(
     finally:
         cluster.close()
 
-    results.sort(
-        key=lambda result: (result["record_id"], result["position"])
-    )
     return results

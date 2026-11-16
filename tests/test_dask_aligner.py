@@ -80,3 +80,33 @@ def test_dask_rejects_invalid_worker_count(tmp_path):
 
     with pytest.raises(ValueError, match="n_workers"):
         find_off_targets_dask(fasta, "AACCG", n_workers=0)
+
+def test_preserves_fasta_record_order_and_repeated_ids(tmp_path):
+    from src.geneweaver.dask_aligner import find_off_targets_dask
+    from src.geneweaver.streaming_aligner import find_off_targets_streaming
+
+    guide = "ACGTAC"
+    fasta = tmp_path / "ordering.fasta"
+    fasta.write_text(
+        ">chrZ\n" + "T" * 10 + guide + "T" * 44 + "\n"
+        ">chrA\n" + "T" * 20 + guide + "T" * 34 + "\n"
+        ">chrZ\n" + "T" * 5 + guide + "T" * 49 + "\n"
+    )
+
+    expected = find_off_targets_streaming(
+        fasta, guide, max_mismatches=0, chunk_size=7
+    )
+    actual = find_off_targets_dask(
+        fasta, guide, max_mismatches=0, chunk_size=7, n_workers=2
+    )
+
+    normalize = lambda hits: [
+        (hit["record_id"], hit["position"]) for hit in hits
+    ]
+
+    assert normalize(actual) == normalize(expected)
+    assert normalize(actual) == [
+        ("chrZ", 10),
+        ("chrA", 20),
+        ("chrZ", 5),
+    ]
