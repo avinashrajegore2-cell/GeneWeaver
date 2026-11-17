@@ -1,16 +1,35 @@
+import argparse
+import random
 import sys
+import tempfile
+import time
+import tracemalloc
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import random
-import tempfile
-import time
-import tracemalloc
-
 from src.geneweaver.streaming_aligner import find_off_targets_streaming
 from src.geneweaver.dask_aligner import find_off_targets_dask
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Benchmark streaming and Dask alignment."
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=100_000,
+        help="Chunk size in bases (default: 100000).",
+    )
+    parser.add_argument(
+        "--task-batch-size",
+        type=int,
+        default=8,
+        help="Number of chunks per Dask task (default: 8).",
+    )
+    return parser.parse_args()
 
 
 def generate_fasta(path, length=1_000_000, line_size=50_000):
@@ -51,6 +70,16 @@ def normalize(results):
 
 
 def main():
+    args = parse_args()
+    chunk_size = args.chunk_size
+    task_batch_size = args.task_batch_size
+
+    if task_batch_size <= 0:
+        raise ValueError("Task batch size must be greater than zero.")
+
+    if chunk_size <= 0:
+        raise ValueError("Chunk size must be greater than zero.")
+
     with tempfile.TemporaryDirectory() as temp_dir:
         fasta_path = Path(temp_dir) / "benchmark.fasta"
         guide = generate_fasta(fasta_path)
@@ -60,21 +89,28 @@ def main():
         print("Reference size: 1,000,000 base pairs")
         print("Guide length:", len(guide))
         print("Inserted exact match at position: 500000")
-        print("Chunk size: 100,000")
+        print(f"Chunk size: {chunk_size:,}")
+        print(f"Task batch size: {task_batch_size}")
         print("Dask workers: 2")
         print()
 
         streaming_results, streaming_time, streaming_memory = measure(
             lambda: find_off_targets_streaming(
-                fasta_path, guide, max_mismatches=3,
-                chunk_size=100_000,
+                fasta_path,
+                guide,
+                max_mismatches=3,
+                chunk_size=chunk_size,
             )
         )
 
         dask_results, dask_time, dask_memory = measure(
             lambda: find_off_targets_dask(
-                fasta_path, guide, max_mismatches=3,
-                chunk_size=100_000, n_workers=2,
+                fasta_path,
+                guide,
+                max_mismatches=3,
+                chunk_size=chunk_size,
+                n_workers=2,
+                task_batch_size=task_batch_size,
             )
         )
 

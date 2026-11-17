@@ -110,3 +110,54 @@ def test_preserves_fasta_record_order_and_repeated_ids(tmp_path):
         ("chrA", 20),
         ("chrZ", 5),
     ]
+
+def test_dask_batches_chunks_and_preserves_result_order(tmp_path):
+    from src.geneweaver.streaming_aligner import find_off_targets_streaming
+
+    guide = "ACGTAC"
+    reference = (
+        "T" * 6
+        + guide
+        + "T" * 18
+        + guide
+        + "T" * 18
+        + guide
+    )
+
+    fasta = tmp_path / "batched.fasta"
+    fasta.write_text(f">chr1\n{reference}\n", encoding="utf-8")
+
+    expected = find_off_targets_streaming(
+        fasta, guide, max_mismatches=0, chunk_size=6
+    )
+    actual = find_off_targets_dask(
+        fasta,
+        guide,
+        max_mismatches=0,
+        chunk_size=6,
+        n_workers=2,
+        task_batch_size=4,
+    )
+
+    normalize = lambda hits: [
+        (hit["record_id"], hit["position"]) for hit in hits
+    ]
+
+    assert normalize(actual) == normalize(expected)
+    assert normalize(actual) == [
+        ("chr1", 6),
+        ("chr1", 30),
+        ("chr1", 54),
+    ]
+
+
+def test_dask_rejects_invalid_task_batch_size(tmp_path):
+    fasta = tmp_path / "sample.fasta"
+    fasta.write_text(">chr1\nAACCGG\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="task_batch_size"):
+        find_off_targets_dask(
+            fasta,
+            "AACCG",
+            task_batch_size=0,
+        )

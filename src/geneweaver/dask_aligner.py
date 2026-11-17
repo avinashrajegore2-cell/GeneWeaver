@@ -52,14 +52,31 @@ def _align_chunk(
     return results
 
 
+def _align_chunk_batch(chunk_tasks, guide, max_mismatches):
+    """Align several independent chunks in one Dask task."""
+    batch_results = []
+
+    for chunk_task in chunk_tasks:
+        batch_results.extend(
+            _align_chunk(
+                *chunk_task,
+                guide,
+                max_mismatches,
+            )
+        )
+
+    return batch_results
+
+
 def find_off_targets_dask(
     file_path: str | Path,
     guide: str,
     max_mismatches: int = 3,
     chunk_size: int = 100_000,
     n_workers: int = 2,
+    task_batch_size: int = 8,
 ) -> list[dict]:
-    """Find off-targets by distributing FASTA chunks across Dask workers."""
+    """Find off-targets using Dask with configurable task batching."""
 
     if not guide:
         raise ValueError("Guide sequence cannot be empty.")
@@ -69,6 +86,8 @@ def find_off_targets_dask(
         raise ValueError("chunk_size must be greater than zero.")
     if n_workers <= 0:
         raise ValueError("n_workers must be greater than zero.")
+    if task_batch_size <= 0:
+        raise ValueError("task_batch_size must be greater than zero.")
 
     guide = guide.upper()
     encode_dna(guide)
@@ -76,6 +95,7 @@ def find_off_targets_dask(
 
     results = []
     futures = []
+    pending_batch = []
     current_record = None
     carryover = ""
 
@@ -101,23 +121,39 @@ def find_off_targets_dask(
                 combined = carryover + sequence
                 combined_start = chunk_start - len(carryover)
 
+                pending_batch.append((
+                    record_id,
+                    combined_start,
+                    combined,
+                    chunk_start,
+                ))
+
+                if len(pending_batch) >= task_batch_size:
+                    futures.append(
+                        client.submit(
+                            _align_chunk_batch,
+                            pending_batch,
+                            guide,
+                            max_mismatches,
+                        )
+                    )
+                    pending_batch = []
+
+                keep = min(guide_length - 1, len(combined))
+                carryover = combined[-keep:] if keep else ""
+
+            if pending_batch:
                 futures.append(
                     client.submit(
-                        _align_chunk,
-                        record_id,
-                        combined_start,
-                        combined,
-                        chunk_start,
+                        _align_chunk_batch,
+                        pending_batch,
                         guide,
                         max_mismatches,
                     )
                 )
 
-                keep = min(guide_length - 1, len(combined))
-                carryover = combined[-keep:] if keep else ""
-
-            for chunk_results in client.gather(futures):
-                results.extend(chunk_results)
+            for batch_results in client.gather(futures):
+                results.extend(batch_results)
 
     finally:
         cluster.close()
