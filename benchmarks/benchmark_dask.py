@@ -1,5 +1,8 @@
 import argparse
+import csv
+import os
 import random
+import statistics
 import sys
 import tempfile
 import time
@@ -15,7 +18,13 @@ from src.geneweaver.dask_aligner import find_off_targets_dask
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Benchmark streaming and Dask alignment."
+        description="Benchmark GeneWeaver Dask scalability."
+    )
+    parser.add_argument(
+        "--reference-size",
+        type=int,
+        default=5_000_000,
+        help="Reference length in bases (default: 5000000).",
     )
     parser.add_argument(
         "--chunk-size",
@@ -24,15 +33,35 @@ def parse_args():
         help="Chunk size in bases (default: 100000).",
     )
     parser.add_argument(
-        "--task-batch-size",
+        "--workers",
+        nargs="+",
         type=int,
-        default=8,
-        help="Number of chunks per Dask task (default: 8).",
+        default=[1, 2, 4, 8],
+        help="Dask worker counts (default: 1 2 4 8).",
+    )
+    parser.add_argument(
+        "--batch-sizes",
+        nargs="+",
+        type=int,
+        default=[1, 2, 4, 8, 16],
+        help="Chunks per Dask task (default: 1 2 4 8 16).",
+    )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=3,
+        help="Trials per configuration (default: 3).",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("benchmarks/dask_scalability_results.csv"),
+        help="CSV output path.",
     )
     return parser.parse_args()
 
 
-def generate_fasta(path, length=1_000_000, line_size=50_000):
+def generate_fasta(path, length, line_size=50_000):
     random.seed(42)
     guide = "ACGTACGTACGTACGTACGT"
 
@@ -49,11 +78,14 @@ def generate_fasta(path, length=1_000_000, line_size=50_000):
 
 def measure(function):
     tracemalloc.start()
-    start = time.perf_counter()
-    result = function()
-    elapsed = time.perf_counter() - start
-    _, peak_memory = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    try:
+        start = time.perf_counter()
+        result = function()
+        elapsed = time.perf_counter() - start
+        _, peak_memory = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
     return result, elapsed, peak_memory / (1024 * 1024)
 
 
@@ -69,71 +101,201 @@ def normalize(results):
     )
 
 
+def validate_args(args):
+    if args.reference_size < 500_020:
+        raise ValueError(
+            "Reference size must be at least 500020 bases "
+            "to contain the inserted match."
+        )
+    if args.chunk_size <= 0:
+        raise ValueError("Chunk size must be greater than zero.")
+    if args.repeats <= 0:
+        raise ValueError("Repeats must be greater than zero.")
+    if any(worker <= 0 for worker in args.workers):
+        raise ValueError("Worker counts must be greater than zero.")
+    if 1 not in args.workers:
+        raise ValueError("Include worker count 1 for speedup comparisons.")
+    if any(batch <= 0 for batch in args.batch_sizes):
+        raise ValueError("Batch sizes must be greater than zero.")
+
+
 def main():
     args = parse_args()
-    chunk_size = args.chunk_size
-    task_batch_size = args.task_batch_size
+    validate_args(args)
 
-    if task_batch_size <= 0:
-        raise ValueError("Task batch size must be greater than zero.")
+    workers_list = list(dict.fromkeys(args.workers))
+    batch_sizes = list(dict.fromkeys(args.batch_sizes))
 
-    if chunk_size <= 0:
-        raise ValueError("Chunk size must be greater than zero.")
+    print("GeneWeaver: Dask Scalability Benchmark")
+    print("=" * 52)
+    print(f"Reference size: {args.reference_size:,} bases")
+    print(f"Chunk size: {args.chunk_size:,}")
+    print(f"Worker counts: {workers_list}")
+    print(f"Task batch sizes: {batch_sizes}")
+    print(f"Trials per configuration: {args.repeats}")
+    print(f"Available logical CPUs: {os.cpu_count()}")
+    print()
 
     with tempfile.TemporaryDirectory() as temp_dir:
         fasta_path = Path(temp_dir) / "benchmark.fasta"
-        guide = generate_fasta(fasta_path)
+        guide = generate_fasta(fasta_path, args.reference_size)
 
-        print("GeneWeaver: Streaming vs Dask Benchmark")
-        print("=" * 48)
-        print("Reference size: 1,000,000 base pairs")
-        print("Guide length:", len(guide))
-        print("Inserted exact match at position: 500000")
-        print(f"Chunk size: {chunk_size:,}")
-        print(f"Task batch size: {task_batch_size}")
-        print("Dask workers: 2")
-        print()
+        print("Running streaming reference benchmark...")
 
         streaming_results, streaming_time, streaming_memory = measure(
             lambda: find_off_targets_streaming(
                 fasta_path,
                 guide,
                 max_mismatches=3,
-                chunk_size=chunk_size,
+                chunk_size=args.chunk_size,
             )
         )
 
-        dask_results, dask_time, dask_memory = measure(
-            lambda: find_off_targets_dask(
-                fasta_path,
-                guide,
-                max_mismatches=3,
-                chunk_size=chunk_size,
-                n_workers=2,
-                task_batch_size=task_batch_size,
-            )
-        )
+        expected = normalize(streaming_results)
 
-        print(f"Streaming time:          {streaming_time:.4f} seconds")
-        print(f"Dask time:               {dask_time:.4f} seconds")
-        print(f"Streaming traced peak:   {streaming_memory:.2f} MB")
-        print(f"Dask traced peak:        {dask_memory:.2f} MB")
+        print(f"Streaming time: {streaming_time:.4f} seconds")
+        print(f"Streaming matches: {len(streaming_results)}")
+        print(f"Streaming client traced peak: {streaming_memory:.2f} MB")
         print()
-        print("Streaming matches:", len(streaming_results))
-        print("Dask matches:     ", len(dask_results))
-
-        if normalize(streaming_results) != normalize(dask_results):
-            raise RuntimeError("Benchmark result verification FAILED")
 
         if not any(
             hit["position"] == 500_000 and hit["mismatches"] == 0
-            for hit in dask_results
+            for hit in streaming_results
         ):
-            raise RuntimeError("Inserted exact match was not detected")
+            raise RuntimeError("Streaming reference missed the known exact match.")
 
-        print("Result verification: PASSED")
-        print("Known match verification: PASSED")
-        print(f"Streaming/Dask time ratio: {streaming_time / dask_time:.2f}x")
+        summary_rows = []
+
+        for batch_size in batch_sizes:
+            for worker_count in workers_list:
+                trial_times = []
+                trial_memories = []
+                match_count = None
+
+                print(
+                    f"Testing workers={worker_count}, "
+                    f"batch_size={batch_size}"
+                )
+
+                for trial in range(1, args.repeats + 1):
+                    dask_results, elapsed, peak_memory = measure(
+                        lambda: find_off_targets_dask(
+                            fasta_path,
+                            guide,
+                            max_mismatches=3,
+                            chunk_size=args.chunk_size,
+                            n_workers=worker_count,
+                            task_batch_size=batch_size,
+                        )
+                    )
+
+                    if normalize(dask_results) != expected:
+                        raise RuntimeError(
+                            "Result verification failed for "
+                            f"workers={worker_count}, "
+                            f"batch_size={batch_size}, trial={trial}."
+                        )
+
+                    if not any(
+                        hit["position"] == 500_000
+                        and hit["mismatches"] == 0
+                        for hit in dask_results
+                    ):
+                        raise RuntimeError("Dask missed the known exact match.")
+
+                    trial_times.append(elapsed)
+                    trial_memories.append(peak_memory)
+                    match_count = len(dask_results)
+
+                    print(
+                        f"  Trial {trial}/{args.repeats}: "
+                        f"{elapsed:.4f}s, "
+                        f"{peak_memory:.2f} MB traced"
+                    )
+
+                summary_rows.append({
+                    "reference_size": args.reference_size,
+                    "chunk_size": args.chunk_size,
+                    "workers": worker_count,
+                    "task_batch_size": batch_size,
+                    "repeats": args.repeats,
+                    "median_seconds": statistics.median(trial_times),
+                    "min_seconds": min(trial_times),
+                    "max_seconds": max(trial_times),
+                    "median_client_traced_peak_mb": statistics.median(
+                        trial_memories
+                    ),
+                    "matches": match_count,
+                })
+
+                print()
+
+    baseline_times = {
+        row["task_batch_size"]: row["median_seconds"]
+        for row in summary_rows
+        if row["workers"] == 1
+    }
+
+    for row in summary_rows:
+        baseline = baseline_times[row["task_batch_size"]]
+        row["speedup_vs_1_worker"] = (
+            baseline / row["median_seconds"]
+            if row["median_seconds"] > 0
+            else 0
+        )
+
+    output_path = args.output
+    if not output_path.is_absolute():
+        output_path = PROJECT_ROOT / output_path
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = list(summary_rows[0].keys())
+
+    with output_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(summary_rows)
+
+    print("=" * 72)
+    print("SCALABILITY SUMMARY")
+    print("=" * 72)
+    print(
+        f"{'Workers':>8} {'Batch':>8} {'Median (s)':>12} "
+        f"{'Traced MB':>12} {'Speedup':>10}"
+    )
+
+    for row in sorted(
+        summary_rows,
+        key=lambda item: (
+            item["workers"],
+            item["task_batch_size"],
+        ),
+    ):
+        print(
+            f"{row['workers']:>8} "
+            f"{row['task_batch_size']:>8} "
+            f"{row['median_seconds']:>12.4f} "
+            f"{row['median_client_traced_peak_mb']:>12.2f} "
+            f"{row['speedup_vs_1_worker']:>9.2f}x"
+        )
+
+    best = min(summary_rows, key=lambda row: row["median_seconds"])
+
+    print()
+    print("Result verification: PASSED for every configuration and trial.")
+    print(
+        "Fastest configuration: "
+        f"{best['workers']} workers, "
+        f"batch size {best['task_batch_size']}, "
+        f"{best['median_seconds']:.4f} seconds median."
+    )
+    print(f"CSV results saved to: {output_path}")
+    print()
+    print(
+        "Memory note: tracemalloc reports client-process Python allocations; "
+        "it does not measure total Dask worker RAM."
+    )
 
 
 if __name__ == "__main__":
