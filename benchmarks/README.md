@@ -113,3 +113,34 @@ For this 1-million-base single-machine workload, Dask was slower than the stream
 This benchmark demonstrates local Dask task scheduling, not multi-machine or multi-GPU execution. The workers used local threads (`processes=False`). Traced memory comes from Python `tracemalloc` and does not represent total process or system RAM.
 
 The benchmark uses synthetic DNA and is not a human-genome performance measurement. Larger workloads and a multi-machine environment are needed to evaluate Dask's scalability.
+
+## Dask Scalability and Process Memory Benchmark
+
+### Requirements
+- Run using the GeneWeaver Python environment.
+- `dask` and `distributed` are required for Dask execution.
+- `psutil` is required for process-tree RSS measurement.
+
+### Usage
+
+Run the default thread-based benchmark:
+
+    python .\benchmarks\benchmark_dask.py
+
+Run with separate worker processes:
+
+    python .\benchmarks\benchmark_dask.py --processes
+
+Example smaller test:
+
+    python .\benchmarks\benchmark_dask.py --reference-size 600000 --chunk-size 100000 --workers 1 2 --batch-sizes 4 8 --repeats 2
+
+### Memory metrics
+
+- Traced MB measures client-process Python allocations using `tracemalloc`.
+- Process RSS MB is the sampled RSS summed across the benchmark process and its descendants.
+- In thread mode, worker memory is part of the benchmark process.
+- In process mode, the total can include Dask worker and scheduler processes.
+- Sampling can miss brief peaks, and summed RSS can double-count shared memory pages.
+
+These measurements are local process-memory observations, not total system memory or worker-only memory.

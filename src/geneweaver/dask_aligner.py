@@ -75,6 +75,7 @@ def find_off_targets_dask(
     chunk_size: int = 100_000,
     n_workers: int = 2,
     task_batch_size: int = 8,
+    processes: bool = False,
 ) -> list[dict]:
     """Find off-targets using Dask with configurable task batching."""
 
@@ -103,7 +104,7 @@ def find_off_targets_dask(
     cluster = LocalCluster(
         n_workers=n_workers,
         threads_per_worker=1,
-        processes=False,
+        processes=processes,
         dashboard_address=None,
     )
 

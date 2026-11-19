@@ -7,7 +7,10 @@ import sys
 import tempfile
 import time
 import tracemalloc
+import threading
 from pathlib import Path
+
+import psutil
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -45,6 +48,11 @@ def parse_args():
         type=int,
         default=[1, 2, 4, 8, 16],
         help="Chunks per Dask task (default: 1 2 4 8 16).",
+    )
+    parser.add_argument(
+        "--processes",
+        action="store_true",
+        help="Use separate Dask worker processes instead of threads.",
     )
     parser.add_argument(
         "--repeats",
@@ -87,6 +95,58 @@ def measure(function):
         tracemalloc.stop()
 
     return result, elapsed, peak_memory / (1024 * 1024)
+
+
+
+class ProcessTreeMemorySampler:
+    """Sample RSS for the benchmark process and its descendants."""
+
+    def __init__(self, interval=0.05):
+        self.interval = interval
+        self.process = psutil.Process(os.getpid())
+        self.peak_bytes = 0
+        self.stop_event = threading.Event()
+        self.thread = None
+
+    def _sample_once(self):
+        try:
+            total = self.process.memory_info().rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return
+
+        try:
+            processes = self.process.children(recursive=True)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            processes = []
+
+        for process in processes:
+            try:
+                total += process.memory_info().rss
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        self.peak_bytes = max(self.peak_bytes, total)
+
+    def _sample(self):
+        while not self.stop_event.is_set():
+            self._sample_once()
+            self.stop_event.wait(self.interval)
+
+    def __enter__(self):
+        self._sample_once()
+        self.thread = threading.Thread(target=self._sample, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.stop_event.set()
+        self.thread.join()
+        self._sample_once()
+        return False
+
+    @property
+    def peak_mb(self):
+        return self.peak_bytes / (1024 * 1024)
 
 
 def normalize(results):
@@ -132,6 +192,7 @@ def main():
     print(f"Chunk size: {args.chunk_size:,}")
     print(f"Worker counts: {workers_list}")
     print(f"Task batch sizes: {batch_sizes}")
+    print(f"Worker process mode: {args.processes}")
     print(f"Trials per configuration: {args.repeats}")
     print(f"Available logical CPUs: {os.cpu_count()}")
     print()
@@ -170,6 +231,7 @@ def main():
             for worker_count in workers_list:
                 trial_times = []
                 trial_memories = []
+                trial_process_tree_memories = []
                 match_count = None
 
                 print(
@@ -178,16 +240,18 @@ def main():
                 )
 
                 for trial in range(1, args.repeats + 1):
-                    dask_results, elapsed, peak_memory = measure(
-                        lambda: find_off_targets_dask(
-                            fasta_path,
-                            guide,
-                            max_mismatches=3,
-                            chunk_size=args.chunk_size,
-                            n_workers=worker_count,
-                            task_batch_size=batch_size,
+                    with ProcessTreeMemorySampler() as memory_sampler:
+                        dask_results, elapsed, peak_memory = measure(
+                            lambda: find_off_targets_dask(
+                                fasta_path,
+                                guide,
+                                max_mismatches=3,
+                                chunk_size=args.chunk_size,
+                                n_workers=worker_count,
+                                task_batch_size=batch_size,
+                                processes=args.processes,
+                            )
                         )
-                    )
 
                     if normalize(dask_results) != expected:
                         raise RuntimeError(
@@ -205,12 +269,14 @@ def main():
 
                     trial_times.append(elapsed)
                     trial_memories.append(peak_memory)
+                    trial_process_tree_memories.append(memory_sampler.peak_mb)
                     match_count = len(dask_results)
 
                     print(
                         f"  Trial {trial}/{args.repeats}: "
                         f"{elapsed:.4f}s, "
-                        f"{peak_memory:.2f} MB traced"
+                        f"{peak_memory:.2f} MB traced, "
+                        f"{memory_sampler.peak_mb:.2f} MB process-tree RSS"
                     )
 
                 summary_rows.append({
@@ -225,6 +291,10 @@ def main():
                     "median_client_traced_peak_mb": statistics.median(
                         trial_memories
                     ),
+                    "median_process_tree_peak_rss_mb": statistics.median(
+                        trial_process_tree_memories
+                    ),
+                    "process_workers": args.processes,
                     "matches": match_count,
                 })
 
@@ -262,7 +332,7 @@ def main():
     print("=" * 72)
     print(
         f"{'Workers':>8} {'Batch':>8} {'Median (s)':>12} "
-        f"{'Traced MB':>12} {'Speedup':>10}"
+        f"{'Traced MB':>12} {'Process RSS MB':>16} {'Speedup':>10}"
     )
 
     for row in sorted(
@@ -277,6 +347,7 @@ def main():
             f"{row['task_batch_size']:>8} "
             f"{row['median_seconds']:>12.4f} "
             f"{row['median_client_traced_peak_mb']:>12.2f} "
+            f"{row['median_process_tree_peak_rss_mb']:>16.2f} "
             f"{row['speedup_vs_1_worker']:>9.2f}x"
         )
 
@@ -293,8 +364,11 @@ def main():
     print(f"CSV results saved to: {output_path}")
     print()
     print(
-        "Memory note: tracemalloc reports client-process Python allocations; "
-        "it does not measure total Dask worker RAM."
+        "Memory note: traced MB is client-process Python allocation from "
+        "tracemalloc. Process RSS MB is sampled RSS summed across the benchmark "
+        "process and its descendants, including Dask processes where present. "
+        "Sampling can miss brief peaks, and summed RSS can count shared pages "
+        "more than once."
     )
 
 
