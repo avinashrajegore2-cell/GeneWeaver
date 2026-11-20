@@ -161,3 +161,42 @@ def test_dask_rejects_invalid_task_batch_size(tmp_path):
             "AACCG",
             task_batch_size=0,
         )
+
+
+def test_dask_with_single_in_flight_batch_preserves_order(tmp_path):
+    guide = "ACGTAC"
+    reference = "TTTTTTACGTACGGGGGGACGTACCCCCCCACGTAC"
+    fasta = tmp_path / "single_in_flight.fasta"
+    fasta.write_text(f">chr1\n{reference}\n", encoding="utf-8")
+
+    actual = find_off_targets_dask(
+        fasta,
+        guide,
+        max_mismatches=0,
+        chunk_size=6,
+        n_workers=2,
+        task_batch_size=1,
+        max_in_flight=1,
+    )
+
+    assert [
+        (hit["record_id"], hit["position"])
+        for hit in actual
+    ] == [
+        ("chr1", 6),
+        ("chr1", 18),
+        ("chr1", 30),
+    ]
+
+
+@pytest.mark.parametrize("max_in_flight", [0, -1])
+def test_dask_rejects_invalid_max_in_flight(tmp_path, max_in_flight):
+    fasta = tmp_path / "invalid_in_flight.fasta"
+    fasta.write_text(">chr1\nACGTACGT\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="max_in_flight"):
+        find_off_targets_dask(
+            fasta,
+            "ACGT",
+            max_in_flight=max_in_flight,
+        )
