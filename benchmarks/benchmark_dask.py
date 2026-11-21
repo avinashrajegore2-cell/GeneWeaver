@@ -50,6 +50,13 @@ def parse_args():
         help="Chunks per Dask task (default: 1 2 4 8 16).",
     )
     parser.add_argument(
+        "--scheduling-modes",
+        nargs="+",
+        choices=("fixed", "adaptive"),
+        default=["fixed", "adaptive"],
+        help="Scheduling modes to compare (default: fixed adaptive).",
+    )
+    parser.add_argument(
         "--processes",
         action="store_true",
         help="Use separate Dask worker processes instead of threads.",
@@ -66,7 +73,20 @@ def parse_args():
         default=Path("benchmarks/dask_scalability_results.csv"),
         help="CSV output path.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.reference_size < 500_020:
+        parser.error("--reference-size must be at least 500020 bases.")
+    if args.chunk_size <= 0:
+        parser.error("--chunk-size must be greater than zero.")
+    if any(worker <= 0 for worker in args.workers):
+        parser.error("All worker counts must be greater than zero.")
+    if any(size <= 0 for size in args.batch_sizes):
+        parser.error("All batch sizes must be greater than zero.")
+    if args.repeats <= 0:
+        parser.error("--repeats must be greater than zero.")
+
+    return args
 
 
 def generate_fasta(path, length, line_size=50_000):
@@ -185,13 +205,15 @@ def main():
 
     workers_list = list(dict.fromkeys(args.workers))
     batch_sizes = list(dict.fromkeys(args.batch_sizes))
+    scheduling_modes = list(dict.fromkeys(args.scheduling_modes))
 
     print("GeneWeaver: Dask Scalability Benchmark")
     print("=" * 52)
     print(f"Reference size: {args.reference_size:,} bases")
     print(f"Chunk size: {args.chunk_size:,}")
     print(f"Worker counts: {workers_list}")
-    print(f"Task batch sizes: {batch_sizes}")
+    print(f"Initial task batch sizes: {batch_sizes}")
+    print(f"Scheduling modes: {scheduling_modes}")
     print(f"Worker process mode: {args.processes}")
     print(f"Trials per configuration: {args.repeats}")
     print(f"Available logical CPUs: {os.cpu_count()}")
@@ -227,87 +249,100 @@ def main():
 
         summary_rows = []
 
-        for batch_size in batch_sizes:
-            for worker_count in workers_list:
-                trial_times = []
-                trial_memories = []
-                trial_process_tree_memories = []
-                match_count = None
+        for scheduling_mode in scheduling_modes:
+            adaptive = scheduling_mode == "adaptive"
 
-                print(
-                    f"Testing workers={worker_count}, "
-                    f"batch_size={batch_size}"
-                )
-
-                for trial in range(1, args.repeats + 1):
-                    with ProcessTreeMemorySampler() as memory_sampler:
-                        dask_results, elapsed, peak_memory = measure(
-                            lambda: find_off_targets_dask(
-                                fasta_path,
-                                guide,
-                                max_mismatches=3,
-                                chunk_size=args.chunk_size,
-                                n_workers=worker_count,
-                                task_batch_size=batch_size,
-                                processes=args.processes,
-                            )
-                        )
-
-                    if normalize(dask_results) != expected:
-                        raise RuntimeError(
-                            "Result verification failed for "
-                            f"workers={worker_count}, "
-                            f"batch_size={batch_size}, trial={trial}."
-                        )
-
-                    if not any(
-                        hit["position"] == 500_000
-                        and hit["mismatches"] == 0
-                        for hit in dask_results
-                    ):
-                        raise RuntimeError("Dask missed the known exact match.")
-
-                    trial_times.append(elapsed)
-                    trial_memories.append(peak_memory)
-                    trial_process_tree_memories.append(memory_sampler.peak_mb)
-                    match_count = len(dask_results)
+            for batch_size in batch_sizes:
+                for worker_count in workers_list:
+                    trial_times = []
+                    trial_memories = []
+                    trial_process_tree_memories = []
+                    match_count = None
 
                     print(
-                        f"  Trial {trial}/{args.repeats}: "
-                        f"{elapsed:.4f}s, "
-                        f"{peak_memory:.2f} MB traced, "
-                        f"{memory_sampler.peak_mb:.2f} MB process-tree RSS"
+                        f"Testing mode={scheduling_mode}, "
+                        f"workers={worker_count}, "
+                        f"initial_batch_size={batch_size}"
                     )
 
-                summary_rows.append({
-                    "reference_size": args.reference_size,
-                    "chunk_size": args.chunk_size,
-                    "workers": worker_count,
-                    "task_batch_size": batch_size,
-                    "repeats": args.repeats,
-                    "median_seconds": statistics.median(trial_times),
-                    "min_seconds": min(trial_times),
-                    "max_seconds": max(trial_times),
-                    "median_client_traced_peak_mb": statistics.median(
-                        trial_memories
-                    ),
-                    "median_process_tree_peak_rss_mb": statistics.median(
-                        trial_process_tree_memories
-                    ),
-                    "process_workers": args.processes,
-                    "matches": match_count,
-                })
+                    for trial in range(1, args.repeats + 1):
+                        with ProcessTreeMemorySampler() as memory_sampler:
+                            dask_results, elapsed, peak_memory = measure(
+                                lambda: find_off_targets_dask(
+                                    fasta_path,
+                                    guide,
+                                    max_mismatches=3,
+                                    chunk_size=args.chunk_size,
+                                    n_workers=worker_count,
+                                    task_batch_size=batch_size,
+                                    processes=args.processes,
+                                    adaptive=adaptive,
+                                )
+                            )
 
-                print()
+                        if normalize(dask_results) != expected:
+                            raise RuntimeError(
+                                "Result verification failed for "
+                                f"mode={scheduling_mode}, "
+                                f"workers={worker_count}, "
+                                f"batch_size={batch_size}, trial={trial}."
+                            )
+
+                        if not any(
+                            hit["position"] == 500_000
+                            and hit["mismatches"] == 0
+                            for hit in dask_results
+                        ):
+                            raise RuntimeError(
+                                "Dask missed the known exact match."
+                            )
+
+                        trial_times.append(elapsed)
+                        trial_memories.append(peak_memory)
+                        trial_process_tree_memories.append(
+                            memory_sampler.peak_mb
+                        )
+                        match_count = len(dask_results)
+
+                        print(
+                            f"  Trial {trial}/{args.repeats}: "
+                            f"{elapsed:.4f}s, "
+                            f"{peak_memory:.2f} MB traced, "
+                            f"{memory_sampler.peak_mb:.2f} MB process-tree RSS"
+                        )
+
+                    summary_rows.append({
+                        "scheduling_mode": scheduling_mode,
+                        "reference_size": args.reference_size,
+                        "chunk_size": args.chunk_size,
+                        "workers": worker_count,
+                        "task_batch_size": batch_size,
+                        "repeats": args.repeats,
+                        "median_seconds": statistics.median(trial_times),
+                        "min_seconds": min(trial_times),
+                        "max_seconds": max(trial_times),
+                        "median_client_traced_peak_mb": statistics.median(
+                            trial_memories
+                        ),
+                        "median_process_tree_peak_rss_mb": statistics.median(
+                            trial_process_tree_memories
+                        ),
+                        "process_workers": args.processes,
+                        "matches": match_count,
+                    })
+
+                    print()
 
     baseline_times = {
-        row["task_batch_size"]: row["median_seconds"]
+        (row["scheduling_mode"], row["task_batch_size"]): row["median_seconds"]
         for row in summary_rows
         if row["workers"] == 1
     }
 
     for row in summary_rows:
-        baseline = baseline_times[row["task_batch_size"]]
+        baseline = baseline_times[
+            (row["scheduling_mode"], row["task_batch_size"])
+        ]
         row["speedup_vs_1_worker"] = (
             baseline / row["median_seconds"]
             if row["median_seconds"] > 0
@@ -327,22 +362,24 @@ def main():
         writer.writeheader()
         writer.writerows(summary_rows)
 
-    print("=" * 72)
-    print("SCALABILITY SUMMARY")
-    print("=" * 72)
+    print("=" * 88)
+    print("SCHEDULING MODE COMPARISON")
+    print("=" * 88)
     print(
-        f"{'Workers':>8} {'Batch':>8} {'Median (s)':>12} "
+        f"{'Mode':>10} {'Workers':>8} {'Batch':>8} {'Median (s)':>12} "
         f"{'Traced MB':>12} {'Process RSS MB':>16} {'Speedup':>10}"
     )
 
     for row in sorted(
         summary_rows,
         key=lambda item: (
+            item["scheduling_mode"],
             item["workers"],
             item["task_batch_size"],
         ),
     ):
         print(
+            f"{row['scheduling_mode']:>10} "
             f"{row['workers']:>8} "
             f"{row['task_batch_size']:>8} "
             f"{row['median_seconds']:>12.4f} "
@@ -357,8 +394,9 @@ def main():
     print("Result verification: PASSED for every configuration and trial.")
     print(
         "Fastest configuration: "
+        f"{best['scheduling_mode']} mode, "
         f"{best['workers']} workers, "
-        f"batch size {best['task_batch_size']}, "
+        f"initial batch size {best['task_batch_size']}, "
         f"{best['median_seconds']:.4f} seconds median."
     )
     print(f"CSV results saved to: {output_path}")
@@ -370,7 +408,6 @@ def main():
         "Sampling can miss brief peaks, and summed RSS can count shared pages "
         "more than once."
     )
-
 
 if __name__ == "__main__":
     main()

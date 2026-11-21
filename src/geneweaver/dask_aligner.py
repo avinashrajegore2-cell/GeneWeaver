@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 import numpy as np
 from distributed import wait
@@ -69,6 +70,14 @@ def _align_chunk_batch(chunk_tasks, guide, max_mismatches):
     return batch_results
 
 
+def _adjust_batch_size(current_size, elapsed_seconds, min_size=1, max_size=16):
+    """Adjust batch size using observed end-to-end task completion time."""
+    if elapsed_seconds < 0.25:
+        return min(max_size, current_size + 1)
+    if elapsed_seconds > 0.75:
+        return max(min_size, current_size - 1)
+    return current_size
+
 def find_off_targets_dask(
     file_path: str | Path,
     guide: str,
@@ -78,9 +87,12 @@ def find_off_targets_dask(
     task_batch_size: int = 8,
     max_in_flight: int | None = None,
     processes: bool = False,
+    adaptive: bool = False,
 ) -> list[dict]:
-    """Find off-targets with batched Dask tasks and bounded in-flight work."""
+    """Find off-targets using bounded Dask scheduling.
 
+    Adaptive mode adjusts task batch size using observed completion latency.
+    """
     if not guide:
         raise ValueError("Guide sequence cannot be empty.")
     if max_mismatches < 0:
@@ -105,31 +117,41 @@ def find_off_targets_dask(
     current_record = None
     carryover = ""
 
-    # Keep both running futures and completed-but-not-yet-emittable batches
-    # within the same limit. This prevents a slow early batch from allowing
-    # later completed batches to accumulate without bound.
     in_flight = {}
     completed = {}
     next_batch_index = 0
     next_result_index = 0
 
+    current_batch_size = min(16, task_batch_size) if adaptive else task_batch_size
+    submission_limit = max_in_flight
+
     def collect_one():
-        nonlocal next_result_index
+        nonlocal next_result_index, current_batch_size
 
         if not in_flight:
             return
 
-        done, _ = wait(
-            list(in_flight.values()),
-            return_when="FIRST_COMPLETED",
-        )
+        futures = [
+            submitted[0] for submitted in in_flight.values()
+        ]
+        done, _ = wait(futures, return_when="FIRST_COMPLETED")
 
         for future in done:
             batch_index = next(
-                index for index, submitted in in_flight.items()
-                if submitted is future
+                index
+                for index, submitted in in_flight.items()
+                if submitted[0] is future
             )
+            submitted_at = in_flight[batch_index][1]
             completed[batch_index] = future.result()
+
+            if adaptive:
+                elapsed = time.perf_counter() - submitted_at
+                current_batch_size = _adjust_batch_size(
+                    current_batch_size,
+                    elapsed,
+                )
+
             del in_flight[batch_index]
 
         while next_result_index in completed:
@@ -139,8 +161,7 @@ def find_off_targets_dask(
     def submit_batch(client, batch):
         nonlocal next_batch_index
 
-        # Completed batches waiting behind an earlier batch consume capacity.
-        while len(in_flight) + len(completed) >= max_in_flight:
+        while len(in_flight) + len(completed) >= submission_limit:
             collect_one()
 
         future = client.submit(
@@ -149,7 +170,7 @@ def find_off_targets_dask(
             guide,
             max_mismatches,
         )
-        in_flight[next_batch_index] = future
+        in_flight[next_batch_index] = (future, time.perf_counter())
         next_batch_index += 1
 
     cluster = LocalCluster(
@@ -161,6 +182,16 @@ def find_off_targets_dask(
 
     try:
         with Client(cluster) as client:
+            if adaptive:
+                active_workers = len(
+                    client.scheduler_info().get("workers", {})
+                )
+                if active_workers > 0:
+                    submission_limit = min(
+                        max_in_flight,
+                        2 * active_workers,
+                    )
+
             for item in iter_fasta_chunks(file_path, chunk_size):
                 record_id = item["record_id"]
                 chunk_start = item["start"]
@@ -180,7 +211,7 @@ def find_off_targets_dask(
                     chunk_start,
                 ))
 
-                if len(pending_batch) >= task_batch_size:
+                if len(pending_batch) >= current_batch_size:
                     submit_batch(client, pending_batch)
                     pending_batch = []
 
@@ -190,8 +221,6 @@ def find_off_targets_dask(
             if pending_batch:
                 submit_batch(client, pending_batch)
 
-            # Drain remaining futures. Ordered emission preserves FASTA order
-            # even when Dask tasks finish in a different order.
             while in_flight:
                 collect_one()
 

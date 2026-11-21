@@ -144,3 +144,58 @@ Example smaller test:
 - Sampling can miss brief peaks, and summed RSS can double-count shared memory pages.
 
 These measurements are local process-memory observations, not total system memory or worker-only memory.
+
+## Adaptive Dask Scheduling Experiment
+
+### Configuration
+
+- Synthetic DNA reference: 5 million and 20 million base pairs.
+- Chunk size: 100,000 base pairs.
+- Guide length: 20 base pairs.
+- Maximum mismatches: 3.
+- Scheduling modes: fixed and adaptive.
+- Initial task batch sizes: 1, 2, 4, 8, and 16 (5M); 1, 4, 8, and 16 (20M).
+- Worker counts: 1, 2, 4, and 8 (5M); 1 and 2 (20M).
+- Repetitions: 3 per configuration.
+- Worker execution: local threads (`processes=False`).
+- Every Dask result was verified against the streaming reference.
+
+### Selected results
+
+The following are median runtimes from the three repetitions.
+
+| Reference size | Mode | Workers | Initial batch | Median runtime |
+|---|---|---:|---:|---:|
+| 5M | Fixed | 1 | 16 | 1.3830 s |
+| 5M | Adaptive | 1 | 16 | 1.6528 s |
+| 20M | Fixed | 2 | 8 | 5.1980 s |
+| 20M | Adaptive | 2 | 8 | 4.7918 s |
+
+At 5M bases, the fastest fixed configuration was approximately 16.3% faster than the fastest adaptive configuration. At 20M bases, adaptive scheduling was approximately 7.8% faster than fixed scheduling at the same two-worker, batch-size-8 configuration.
+
+### Memory observations
+
+Process-tree RSS was higher for adaptive scheduling in the measured configurations. For example:
+
+- At 5M bases, one worker and initial batch size 16: fixed 154.92 MB; adaptive 281.33 MB.
+- At 20M bases, two workers and initial batch size 8: fixed 262.44 MB; adaptive 291.28 MB.
+
+These are sampled process-tree RSS measurements, not worker-only memory measurements. RSS can include shared pages and is sensitive to the local runtime environment.
+
+### Interpretation and limitations
+
+Adaptive scheduling adjusts the task batch size using observed end-to-end task completion latency. This latency includes queueing and scheduling time, not only worker execution time. The initial batch size is capped at 16 in adaptive mode, and the in-flight submission limit is bounded using the active worker count.
+
+The results are workload-dependent: adaptive scheduling did not improve the 5M-base benchmark, but improved the 20M-base result at the tested two-worker, batch-size-8 configuration. It also showed higher process-tree RSS in the measured comparisons.
+
+Adaptive scheduling therefore remains an opt-in experimental feature. Fixed scheduling remains the default. These synthetic, single-machine experiments do not establish performance for human-genome datasets or multi-machine clusters.
+
+### Reproducing the experiments
+
+5-million-base comparison:
+
+    .\.venv-cuda\Scripts\python.exe .\benchmarks\benchmark_dask.py --reference-size 5000000 --chunk-size 100000 --workers 1 2 4 8 --batch-sizes 1 2 4 8 16 --scheduling-modes fixed adaptive --repeats 3 --output .\benchmarks\dask_adaptive_5m.csv
+
+20-million-base comparison:
+
+    .\.venv-cuda\Scripts\python.exe .\benchmarks\benchmark_dask.py --reference-size 20000000 --chunk-size 100000 --workers 1 2 --batch-sizes 1 4 8 16 --scheduling-modes fixed adaptive --repeats 3 --output .\benchmarks\dask_adaptive_20m.csv
