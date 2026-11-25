@@ -1,4 +1,4 @@
-# GeneWeaver Benchmark Report
+﻿# GeneWeaver Benchmark Report
 
 ## CPU vs NumPy Alignment
 
@@ -213,32 +213,32 @@ Adaptive scheduling therefore remains an opt-in experimental feature. Fixed sche
 - Repetitions: 3 per configuration.
 - Every Dask result was verified against the streaming reference.
 
-The 5M experiment tested 1, 2, 4, and 8 workers with batch sizes 1, 2, 4, 8, and 16. The 20M experiment tested 1, 2, and 4 workers with batch sizes 1, 4, 8, and 16.
+The 5M experiment tested 1, 2, 4, and 8 workers with batch sizes 1, 2, 4, 8, and 16. The 20M experiment tested 1 and 2 workers with batch sizes 1, 4, 8, and 16.
 
 ### Selected results
 
 | Reference size | Mode | Workers | Initial batch | Median runtime |
 |---|---|---:|---:|---:|
-| 5M | Fixed | 1 | 16 | 3.3054 s |
-| 5M | Adaptive | 1 | 2 | 3.2930 s |
-| 20M | Fixed | 2 | 16 | 5.1573 s |
-| 20M | Adaptive | 2 | 16 | 4.8555 s |
+| 5M | Fixed | 1 | 16 | 3.3125 s |
+| 5M | Adaptive | 1 | 2 | 3.1757 s |
+| 20M | Fixed | 2 | 16 | 4.8080 s |
+| 20M | Adaptive | 2 | 16 | 5.2322 s |
 
-At 5M bases, the fastest fixed and adaptive configurations had nearly identical runtimes. At 20M bases, the fastest adaptive configuration was approximately 5.9% faster than the fastest fixed configuration.
+At 5M bases, adaptive was approximately 4.1% faster than fixed at the best observed configurations. At 20M bases, fixed was approximately 8.1% faster than adaptive.
 
 ### Memory and scaling observations
 
 Process-tree RSS increased with worker count. In the 5M experiment, eight workers used approximately 680-735 MB of process-tree RSS and were substantially slower than one worker.
 
-In the 20M experiment, two workers produced the fastest configurations. Four workers did not improve performance over the best two-worker configurations.
+In the 20M experiment, two workers produced the fastest configurations among the tested worker counts.
 
 Process-tree RSS is sampled across the benchmark process and its descendants. It can count shared pages more than once, and sampling may miss brief peaks.
 
 ### Interpretation and limitations
 
-Separate worker processes introduce memory and startup overhead. They did not improve the smaller 5M workload, while two workers helped on the larger 20M workload.
+Separate worker processes introduce memory and startup overhead. They did not improve the best runtime over threads in the 5M experiment. At 20M, the best thread and process configurations were nearly tied.
 
-Adaptive scheduling offered negligible improvement at 5M and a modest improvement at 20M. These results are specific to the tested synthetic workloads and machine. They do not establish a universally optimal worker count or scheduling mode.
+Adaptive scheduling had a small advantage at 5M, while fixed scheduling was faster at 20M in the latest process run. These results are specific to the tested synthetic workloads and machine. They do not establish a universally optimal worker count or scheduling mode.
 
 Adaptive scheduling remains opt-in, and fixed scheduling remains the default.
 
@@ -250,4 +250,4 @@ Adaptive scheduling remains opt-in, and fixed scheduling remains the default.
 
 20-million-base process-mode comparison:
 
-    .\.venv-cuda\Scripts\python.exe .\benchmarks\benchmark_dask.py --reference-size 20000000 --chunk-size 100000 --workers 1 2 4 --batch-sizes 1 4 8 16 --scheduling-modes fixed adaptive --repeats 3 --processes --output .\benchmarks\dask_process_20m.csv
+    .\.venv-cuda\Scripts\python.exe .\benchmarks\benchmark_dask.py --reference-size 20000000 --chunk-size 100000 --workers 1 2 --batch-sizes 1 4 8 16 --scheduling-modes fixed adaptive --repeats 3 --processes --output .\benchmarks\dask_process_20m.csv
