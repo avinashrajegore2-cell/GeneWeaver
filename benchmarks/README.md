@@ -251,3 +251,65 @@ Adaptive scheduling remains opt-in, and fixed scheduling remains the default.
 20-million-base process-mode comparison:
 
     .\.venv-cuda\Scripts\python.exe .\benchmarks\benchmark_dask.py --reference-size 20000000 --chunk-size 100000 --workers 1 2 --batch-sizes 1 4 8 16 --scheduling-modes fixed adaptive --repeats 3 --processes --output .\benchmarks\dask_process_20m.csv
+
+## Serial Streaming vs Dask Performance Comparison
+
+### Purpose and configuration
+
+This experiment compares the streaming serial implementation against local thread-based Dask scheduling. It uses the same synthetic reference, guide, mismatch threshold, and chunk size for both implementations.
+
+- Synthetic DNA reference sizes: 5 million and 20 million base pairs.
+- Chunk size: 100,000 base pairs.
+- Guide length: 20 base pairs.
+- Maximum mismatches: 3.
+- Dask scheduling modes: fixed and adaptive.
+- Dask worker counts: 1, 2, 4, and 8.
+- Initial task batch sizes: 1, 2, 4, 8, and 16.
+- Repetitions: 3 per configuration, including the streaming baseline.
+- Worker execution: local threads (`processes=False`).
+- Every Dask result was verified against the streaming reference.
+
+The 20M experiment used 1 and 2 workers, with batch sizes 1, 4, 8, and 16.
+
+### Selected results
+
+| Reference size | Execution mode | Configuration | Median runtime | Relative speed |
+|---|---|---|---:|---:|
+| 5M | Streaming | Serial | 0.8569 s | 1.00x |
+| 5M | Dask fixed | 1 worker, batch 8 | 1.3992 s | 0.61x |
+| 5M | Dask adaptive | 1 worker, batch 4 | 1.4510 s | 0.59x |
+| 20M | Streaming | Serial | 3.3922 s | 1.00x |
+| 20M | Dask fixed | 2 workers, batch 8 | 5.0109 s | 0.68x |
+| 20M | Dask adaptive | 2 workers, batch 16 | 4.8122 s | 0.70x |
+
+Relative speed is calculated as the streaming median runtime divided by the Dask median runtime. Values below 1.0x mean Dask was slower than serial streaming.
+
+At 5M bases, the fastest Dask configuration was approximately 63% slower than streaming. At 20M bases, the fastest Dask configuration was approximately 42% slower.
+
+### Memory observations
+
+The streaming baseline's median client-process Python traced peak was approximately 3.95 MB at both reference sizes.
+
+The fastest Dask configurations had median client-process traced peaks of approximately 13.86 MB at 5M and 45.33 MB at 20M.
+
+These traced allocations are not directly equivalent to total process memory. Process-tree RSS is separately sampled across the benchmark process and its descendants. RSS may include shared pages and sampling can miss brief peaks.
+
+### Interpretation and limitations
+
+For both tested reference sizes, serial streaming outperformed every tested Dask configuration. Dask scheduling, task submission, and coordination overhead outweighed the benefits of parallel execution on this single-machine workload.
+
+Adaptive scheduling improved the best Dask runtime over the best fixed configuration at 20M, but neither mode surpassed serial streaming. At 5M, fixed scheduling produced the fastest Dask result.
+
+These results do not mean Dask cannot help with larger workloads, distributed execution, or different hardware. They show that Dask did not provide a single-machine runtime improvement for these particular synthetic workloads and configurations.
+
+Streaming should remain the performance baseline for these tests. Dask remains an optional distributed-scheduling capability rather than a demonstrated speed optimization for these cases.
+
+### Reproducing the experiments
+
+5-million-base serial-versus-Dask comparison:
+
+    .\.venv-cuda\Scripts\python.exe .\benchmarks\benchmark_dask.py --reference-size 5000000 --chunk-size 100000 --workers 1 2 4 8 --batch-sizes 1 2 4 8 16 --scheduling-modes fixed adaptive --repeats 3 --output "$env:TEMP\geneweaver_serial_dask_5m_threads.csv"
+
+20-million-base serial-versus-Dask comparison:
+
+    .\.venv-cuda\Scripts\python.exe .\benchmarks\benchmark_dask.py --reference-size 20000000 --chunk-size 100000 --workers 1 2 --batch-sizes 1 2 4 8 16 --scheduling-modes fixed adaptive --repeats 3 --output "$env:TEMP\geneweaver_serial_dask_20m_threads.csv"

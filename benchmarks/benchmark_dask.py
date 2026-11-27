@@ -19,6 +19,22 @@ from src.geneweaver.streaming_aligner import find_off_targets_streaming
 from src.geneweaver.dask_aligner import find_off_targets_dask
 
 
+def summarize_trials(times, memories):
+    if not times:
+        raise ValueError("at least one trial is required")
+
+    if len(times) != len(memories):
+        raise ValueError(
+            "times and memories must have the same number of trials"
+        )
+
+    return {
+        "median_seconds": statistics.median(times),
+        "min_seconds": min(times),
+        "max_seconds": max(times),
+        "median_client_traced_peak_mb": statistics.median(memories),
+    }
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Benchmark GeneWeaver Dask scalability."
@@ -223,24 +239,53 @@ def main():
         fasta_path = Path(temp_dir) / "benchmark.fasta"
         guide = generate_fasta(fasta_path, args.reference_size)
 
-        print("Running streaming reference benchmark...")
+        print("Running streaming serial baseline...")
 
-        streaming_results, streaming_time, streaming_memory = measure(
-            lambda: find_off_targets_streaming(
-                fasta_path,
-                guide,
-                max_mismatches=3,
-                chunk_size=args.chunk_size,
+        streaming_trial_times = []
+        streaming_trial_memories = []
+        streaming_results = None
+
+        for trial in range(1, args.repeats + 1):
+            results, elapsed, peak_memory = measure(
+                lambda: find_off_targets_streaming(
+                    fasta_path,
+                    guide,
+                    max_mismatches=3,
+                    chunk_size=args.chunk_size,
+                )
             )
+
+            if streaming_results is not None:
+                if normalize(results) != normalize(streaming_results):
+                    raise RuntimeError(
+                        "Streaming results differed between baseline trials."
+                    )
+
+            streaming_results = results
+            streaming_trial_times.append(elapsed)
+            streaming_trial_memories.append(peak_memory)
+
+            print(
+                f"  Streaming trial {trial}/{args.repeats}: "
+                f"{elapsed:.4f}s, {peak_memory:.2f} MB traced"
+            )
+
+        streaming_summary = summarize_trials(
+            streaming_trial_times,
+            streaming_trial_memories,
         )
 
+        streaming_time = streaming_summary["median_seconds"]
+        streaming_memory = streaming_summary["median_client_traced_peak_mb"]
         expected = normalize(streaming_results)
 
-        print(f"Streaming time: {streaming_time:.4f} seconds")
+        print(f"Streaming median time: {streaming_time:.4f} seconds")
         print(f"Streaming matches: {len(streaming_results)}")
-        print(f"Streaming client traced peak: {streaming_memory:.2f} MB")
+        print(
+            f"Streaming median client traced peak: "
+            f"{streaming_memory:.2f} MB"
+        )
         print()
-
         if not any(
             hit["position"] == 500_000 and hit["mismatches"] == 0
             for hit in streaming_results
@@ -311,6 +356,11 @@ def main():
                             f"{memory_sampler.peak_mb:.2f} MB process-tree RSS"
                         )
 
+                    trial_summary = summarize_trials(
+                        trial_times,
+                        trial_memories,
+                    )
+
                     summary_rows.append({
                         "scheduling_mode": scheduling_mode,
                         "reference_size": args.reference_size,
@@ -318,14 +368,18 @@ def main():
                         "workers": worker_count,
                         "task_batch_size": batch_size,
                         "repeats": args.repeats,
-                        "median_seconds": statistics.median(trial_times),
-                        "min_seconds": min(trial_times),
-                        "max_seconds": max(trial_times),
-                        "median_client_traced_peak_mb": statistics.median(
-                            trial_memories
-                        ),
+                        **trial_summary,
                         "median_process_tree_peak_rss_mb": statistics.median(
                             trial_process_tree_memories
+                        ),
+                        "streaming_median_seconds": streaming_time,
+                        "streaming_median_client_traced_peak_mb": (
+                            streaming_memory
+                        ),
+                        "speedup_vs_streaming": (
+                            streaming_time / trial_summary["median_seconds"]
+                            if trial_summary["median_seconds"] > 0
+                            else 0
                         ),
                         "process_workers": args.processes,
                         "matches": match_count,
@@ -367,7 +421,7 @@ def main():
     print("=" * 88)
     print(
         f"{'Mode':>10} {'Workers':>8} {'Batch':>8} {'Median (s)':>12} "
-        f"{'Traced MB':>12} {'Process RSS MB':>16} {'Speedup':>10}"
+        f"{'Traced MB':>12} {'Process RSS MB':>16} {'vs Serial':>10}"
     )
 
     for row in sorted(
@@ -385,7 +439,7 @@ def main():
             f"{row['median_seconds']:>12.4f} "
             f"{row['median_client_traced_peak_mb']:>12.2f} "
             f"{row['median_process_tree_peak_rss_mb']:>16.2f} "
-            f"{row['speedup_vs_1_worker']:>9.2f}x"
+            f"{row['speedup_vs_streaming']:>9.2f}x"
         )
 
     best = min(summary_rows, key=lambda row: row["median_seconds"])
