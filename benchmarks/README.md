@@ -313,3 +313,67 @@ Streaming should remain the performance baseline for these tests. Dask remains a
 20-million-base serial-versus-Dask comparison:
 
     .\.venv-cuda\Scripts\python.exe .\benchmarks\benchmark_dask.py --reference-size 20000000 --chunk-size 100000 --workers 1 2 --batch-sizes 1 2 4 8 16 --scheduling-modes fixed adaptive --repeats 3 --output "$env:TEMP\geneweaver_serial_dask_20m_threads.csv"
+
+## 50M Serial Streaming vs Dask Scalability Experiment
+
+A third experiment evaluated a 50-million-base reference to investigate whether Dask could approach or exceed serial streaming performance at a larger workload.
+
+The experiment used:
+- Reference size: 50 million bases.
+- Chunk size: 100,000.
+- Guide length: 20 bases.
+- Maximum mismatches: 3.
+- Scheduling modes: fixed and adaptive.
+- Workers: 1 and 2.
+- Initial batch sizes: 8 and 16.
+- Repeats: 3 per configuration.
+- Execution mode: Dask threads, not processes.
+
+### Serial baseline
+
+| Execution mode | Median runtime | Client traced peak |
+|---|---:|---:|
+| Streaming serial | 8.1317 s | 3.97 MB |
+
+### Dask results
+
+| Scheduling mode | Workers | Batch size | Median runtime | Relative speed |
+|---|---:|---:|---:|---:|
+| Fixed | 1 | 8 | 13.9957 s | 0.58x |
+| Fixed | 2 | 8 | 13.0068 s | 0.63x |
+| Fixed | 1 | 16 | 12.6314 s | 0.64x |
+| Fixed | 2 | 16 | 12.3915 s | 0.66x |
+| Adaptive | 1 | 8 | 13.5618 s | 0.60x |
+| Adaptive | 2 | 8 | 12.4886 s | 0.65x |
+| Adaptive | 1 | 16 | 12.0024 s | 0.68x |
+| Adaptive | 2 | 16 | 13.7969 s | 0.59x |
+
+Relative speed is calculated as the streaming median runtime divided by the Dask median runtime. Values below 1.0x mean Dask was slower than serial streaming.
+
+The fastest Dask configuration was adaptive scheduling with 1 worker and batch size 16. Its median runtime was 12.0024 seconds, approximately 47.6% slower than serial streaming.
+
+### Memory observations
+
+The serial streaming baseline had a median client-process Python traced peak of approximately 3.97 MB.
+
+The fastest Dask configuration had:
+- Client-process traced peak: 101.26 MB.
+- Sampled process-tree RSS: 409.54 MB.
+
+Across all Dask configurations, client-process traced peaks ranged from approximately 100.97 to 103.77 MB. Sampled process-tree RSS ranged from approximately 226.38 to 436.95 MB.
+
+Traced allocations and process-tree RSS measure different aspects of memory usage and should not be treated as directly equivalent. RSS may include shared pages, and sampling can miss brief peaks.
+
+### Interpretation and limitations
+
+Serial streaming remained faster than all tested Dask configurations at 50M bases. Adaptive scheduling with one worker and batch size 16 produced the best Dask runtime, but scheduling overhead continued to outweigh the benefits of parallel execution.
+
+Across the 5M, 20M, and 50M experiments, Dask did not demonstrate a runtime crossover against serial streaming on this machine.
+
+These findings apply to the tested synthetic workloads, hardware, and single-machine configurations. They do not establish how Dask would perform on a distributed cluster or substantially different hardware.
+
+Serial streaming remains the performance baseline. Dask remains an optional scheduling capability whose performance benefits have not yet been demonstrated for these workloads.
+
+### Reproducing the 50M experiment
+
+    .\.venv-cuda\Scripts\python.exe .\benchmarks\benchmark_dask.py --reference-size 50000000 --chunk-size 100000 --workers 1 2 --batch-sizes 8 16 --scheduling-modes fixed adaptive --repeats 3 --output "$env:TEMP\geneweaver_serial_dask_50m_threads.csv"
